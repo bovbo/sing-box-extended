@@ -1,0 +1,83 @@
+name: Kwrt ARMv7
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Build version label"
+        required: true
+        type: string
+        default: "1.14.3-extended-2.7.3-kwrt-armv7"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: kwrt-armv7-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build Kwrt ARMv7 (Cortex-A7)
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
+        with:
+          fetch-depth: 1
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.8"
+          cache: true
+
+      - name: Install patch tools
+        run: sudo apt-get update && sudo apt-get install -y python3
+
+      - name: Patch sing-tun ARM32 route table overflow
+        run: bash .github/scripts/patch-sing-tun-arm32.sh
+
+      - name: Verify patched dependency
+        run: |
+          set -euo pipefail
+          module_dir="$(go list -m -f '{{.Dir}}' github.com/sagernet/sing-tun)"
+          grep -F 'candidate := int(rand.Uint32() & 0x7fffffff)' "$module_dir/redirect_route_linux.go"
+          grep -F 'candidate <= 255' "$module_dir/redirect_route_linux.go"
+
+      - name: Build sing-box
+        env:
+          CGO_ENABLED: "0"
+          GOOS: linux
+          GOARCH: arm
+          GOARM: "7"
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          TAGS="$(cat release/DEFAULT_BUILD_TAGS_OTHERS)"
+          go build -v -trimpath -o dist/sing-box \
+            -tags "$TAGS" \
+            -ldflags "-X 'github.com/sagernet/sing-box/constant.Version=${{ inputs.version }}' $(cat release/LDFLAGS) -s -w -buildid=" \
+            ./cmd/sing-box
+          file dist/sing-box
+          readelf -h dist/sing-box | grep -E 'Class:|Machine:'
+
+      - name: Package and checksum
+        run: |
+          set -euo pipefail
+          version="${{ inputs.version }}"
+          mkdir -p "dist/sing-box-${version}-linux-armv7"
+          install -m 0755 dist/sing-box "dist/sing-box-${version}-linux-armv7/sing-box"
+          cp LICENSE "dist/sing-box-${version}-linux-armv7/"
+          tar -C dist -czf "dist/sing-box-${version}-linux-armv7.tar.gz" "sing-box-${version}-linux-armv7"
+          (cd dist && sha256sum "sing-box-${version}-linux-armv7.tar.gz" > "sing-box-${version}-linux-armv7.tar.gz.sha256")
+
+      - name: Upload ARMv7 build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sing-box-${{ inputs.version }}-linux-armv7
+          path: |
+            dist/sing-box-*-linux-armv7.tar.gz
+            dist/sing-box-*-linux-armv7.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 30
